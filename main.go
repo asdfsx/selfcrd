@@ -9,9 +9,9 @@ import (
 
 	crd_v1 "github.com/asdfsx/selfcrd/pkg/apis/selfcrd/v1"
 	crdclient "github.com/asdfsx/selfcrd/pkg/client/clientset/versioned"
+	crdinformer "github.com/asdfsx/selfcrd/pkg/client/informers/externalversions"
 	v1 "k8s.io/api/core/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
@@ -20,15 +20,13 @@ import (
 )
 
 type Controller struct {
-	indexer  cache.Indexer
 	queue    workqueue.RateLimitingInterface
-	informer cache.Controller
+	informer cache.SharedIndexInformer
 }
 
-func NewController(queue workqueue.RateLimitingInterface, indexer cache.Indexer, informer cache.Controller) *Controller {
+func NewController(queue workqueue.RateLimitingInterface, informer cache.SharedIndexInformer) *Controller {
 	return &Controller{
 		informer: informer,
-		indexer:  indexer,
 		queue:    queue,
 	}
 }
@@ -55,7 +53,7 @@ func (c *Controller) processNextItem() bool {
 // information about the pod to stdout. In case an error happened, it has to simply return the error.
 // The retry logic should not be part of the business logic.
 func (c *Controller) syncToStdout(key string) error {
-	obj, exists, err := c.indexer.GetByKey(key)
+	obj, exists, err := c.informer.GetIndexer().GetByKey(key)
 	if err != nil {
 		klog.Errorf("Fetching object with key %s from store failed with %v", key, err)
 		return err
@@ -105,8 +103,6 @@ func (c *Controller) Run(threadiness int, stopCh chan struct{}) {
 	defer c.queue.ShutDown()
 	klog.Info("Starting Pod controller")
 
-	go c.informer.Run(stopCh)
-
 	// Wait for all involved caches to be synced, before processing items from the queue is started
 	if !cache.WaitForCacheSync(stopCh, c.informer.HasSynced) {
 		runtime.HandleError(fmt.Errorf("Timed out waiting for caches to sync"))
@@ -134,6 +130,9 @@ func main() {
 	flag.StringVar(&master, "master", "", "master url")
 	flag.Parse()
 
+	// create the workqueue
+	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+
 	// creates the connection
 	config, err := clientcmd.BuildConfigFromFlags(master, kubeconfig)
 	if err != nil {
@@ -146,17 +145,9 @@ func main() {
 		klog.Fatal(err)
 	}
 
-	// create the pod watcher
-	crdListWatcher := cache.NewListWatchFromClient(clientset.ClustarV1().RESTClient(), "selfcrds" , v1.NamespaceAll, fields.Everything())
-
-	// create the workqueue
-	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-
-	// Bind the workqueue to a cache with the help of an informer. This way we make sure that
-	// whenever the cache is updated, the pod key is added to the workqueue.
-	// Note that when we finally process the item from the workqueue, we might see a newer version
-	// of the Pod than the version which was responsible for triggering the update.
-	indexer, informer := cache.NewIndexerInformer(crdListWatcher, &crd_v1.SelfCRD{}, 0, cache.ResourceEventHandlerFuncs{
+	selfCRDInformerFactory := crdinformer.NewSharedInformerFactory(clientset, 30 * time.Minute)
+	informer := selfCRDInformerFactory.Clustar().V1().SelfCRDs().Informer()
+	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			key, err := cache.MetaNamespaceKeyFunc(obj)
 			if err == nil {
@@ -177,15 +168,15 @@ func main() {
 				queue.Add(key)
 			}
 		},
-	}, cache.Indexers{})
+	})
 
-	controller := NewController(queue, indexer, informer)
+	controller := NewController(queue, informer)
 
 	// We can now warm up the cache for initial synchronization.
 	// Let's suppose that we knew about a pod "mypod" on our last run, therefore add it to the cache.
 	// If this pod is not there anymore, the controller will be notified about the removal after the
 	// cache has synchronized.
-	indexer.Add(&crd_v1.SelfCRD{
+	informer.GetIndexer().Add(&crd_v1.SelfCRD{
 		ObjectMeta: meta_v1.ObjectMeta{
 			Name:      "mycrd",
 			Namespace: v1.NamespaceDefault,
@@ -195,7 +186,9 @@ func main() {
 	// Now let's start the controller
 	stop := make(chan struct{})
 	defer close(stop)
+
 	go controller.Run(1, stop)
+	go selfCRDInformerFactory.Start(stop)
 
 	// Wait forever
 	select {}
