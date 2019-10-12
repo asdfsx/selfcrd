@@ -1,0 +1,7 @@
+apiVersion: "clustar.ai/v1"
+kind: SelfCRD
+metadata:
+  name: my-first-selfcrd
+spec:
+  username: "name:aaaa"
+  custom_id: "id:bbbb"
