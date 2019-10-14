@@ -66,6 +66,7 @@ func (c *Controller) syncToStdout(key string) error {
 		// Note that you also have to check the uid if you have a local controlled resource, which
 		// is dependent on the actual instance, to detect that a Pod was recreated with the same name
 		fmt.Printf("Sync/Add/Update for Pod %s\n", obj.(*crd_v1.SelfCRD).GetName())
+		fmt.Printf("Username:%s, CustomID: %s\n", obj.(*crd_v1.SelfCRD).Spec.Username, obj.(*crd_v1.SelfCRD).Spec.CustomID)
 	}
 	return nil
 }
